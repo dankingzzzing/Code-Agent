@@ -13,9 +13,9 @@ from .tools import ToolRegistry
 
 
 def create_agent(root: Path, *, demo: bool, allow_exec: bool = False,
-                 session: str | None = None) -> CodeReviewAgent:
+                 session: str | None = None, config: Config | None = None) -> CodeReviewAgent:
     root = root.resolve()
-    config = Config.from_env(root)
+    config = config if config is not None else Config.from_env(root)
     provider = DemoProvider() if demo else LLMProvider(config)
     memory = ConversationMemory(SYSTEM_PROMPT, max_turns=config.memory_turns)
     tools = ToolRegistry(root, allow_exec=allow_exec, test_timeout=config.test_timeout)

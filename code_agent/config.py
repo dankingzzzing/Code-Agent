@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -44,7 +44,7 @@ class Config:
     api_key: str = field(default="", repr=False)
     model: str = ""
     base_url: str = "https://api.openai.com/v1"
-    api_style: str = "responses"
+    api_style: str = "auto"
     timeout: float = 45
     max_retries: int = 2
     max_steps: int = 12
@@ -55,6 +55,11 @@ class Config:
     @classmethod
     def from_env(cls, root: Path) -> "Config":
         values = {**load_env(root / ".env"), **os.environ}
+        return cls.from_values(values)
+
+    @classmethod
+    def from_values(cls, values: dict) -> "Config":
+        """Validate environment-shaped values without reading another project's .env."""
 
         def number(name: str, default: int | float, low: float, high: float):
             try:
@@ -65,10 +70,16 @@ class Config:
                 raise ConfigError(f"{name} 必须在 {low:g} 至 {high:g} 之间。")
             return value
 
-        style = values.get("LLM_API_STYLE", "responses").strip()
-        if style not in {"responses", "chat_completions"}:
-            raise ConfigError("LLM_API_STYLE 只能是 responses 或 chat_completions。")
+        style = values.get("LLM_API_STYLE", "auto").strip()
+        if style not in {"auto", "responses", "chat_completions"}:
+            raise ConfigError("LLM_API_STYLE 只能是 auto、responses 或 chat_completions。")
         base_url = values.get("LLM_BASE_URL", cls.base_url).strip().rstrip("/")
+        for endpoint in ("/chat/completions", "/responses"):
+            if base_url.endswith(endpoint):
+                base_url = base_url[:-len(endpoint)]
+                if style == "auto":
+                    style = "responses" if endpoint == "/responses" else "chat_completions"
+                break
         parsed = urlsplit(base_url)
         if (parsed.scheme not in {"https", "http"} or not parsed.hostname
                 or parsed.username or parsed.password or parsed.query or parsed.fragment):
@@ -88,6 +99,34 @@ class Config:
             test_timeout=number("AGENT_TEST_TIMEOUT", 10.0, 0.1, 60),
         )
 
+    @property
+    def resolved_api_style(self) -> str:
+        if self.api_style != "auto":
+            return self.api_style
+        return "responses" if urlsplit(self.base_url).hostname == "api.openai.com" else "chat_completions"
+
+    def with_web_settings(self, values: dict) -> "Config":
+        allowed = {"api_key", "model", "base_url", "api_style"}
+        if set(values) - allowed or any(not isinstance(v, str) for v in values.values()):
+            raise ConfigError("模型配置必须是 API key、模型、服务地址和协议字符串。")
+        current = asdict(self)
+        mapping = {"api_key": "LLM_API_KEY", "model": "LLM_MODEL", "base_url": "LLM_BASE_URL",
+                   "api_style": "LLM_API_STYLE", "timeout": "LLM_TIMEOUT", "max_retries": "LLM_MAX_RETRIES",
+                   "max_steps": "AGENT_MAX_STEPS", "max_tool_calls": "AGENT_MAX_TOOL_CALLS",
+                   "memory_turns": "AGENT_MEMORY_TURNS", "test_timeout": "AGENT_TEST_TIMEOUT"}
+        merged = {mapping[key]: value for key, value in current.items()}
+        for key, value in values.items():
+            if key == "api_key" and not value.strip():
+                continue
+            merged[mapping[key]] = value
+        result = self.from_values(merged)
+        if (not values.get("api_key", "").strip() and result.base_url != self.base_url
+                and urlsplit(result.base_url).netloc != urlsplit(self.base_url).netloc):
+            raise ConfigError("更换模型服务地址时，请重新填写 API key。")
+        return result
+
     def require_llm(self) -> None:
         if not self.api_key or not self.model:
             raise ConfigError("真实 LLM 模式需要 LLM_API_KEY 和 LLM_MODEL。可先使用 --demo 离线演示。")
+        if len(self.api_key) > 4096 or any(c.isspace() for c in self.api_key):
+            raise ConfigError("API key 格式无效，请只填写密钥本身，不要附带空格、换行或 Bearer 前缀。")

@@ -8,7 +8,25 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header><a class="brand" href="/">&lt;/&gt; CODE AGENT</a><span>Homework 01</span></header>
+  <header><a class="brand" href="/">&lt;/&gt; CODE AGENT</a><div class="header-actions"><button id="model-settings" type="button" class="quiet">模型设置</button><span>Homework 01</span></div></header>
+  <dialog id="model-dialog" aria-labelledby="model-heading">
+    <form id="model-form" autocomplete="off">
+      <div class="section-head"><h2 id="model-heading">连接你的模型</h2><button id="close-settings" type="button" class="quiet" hidden>关闭</button></div>
+      <p class="dialog-intro">填写 API Key、模型名称和服务地址，验证成功后开始审查。</p>
+      <label for="api-key">API Key</label>
+      <input id="api-key" type="password" placeholder="填写你的 API Key" autocomplete="off" spellcheck="false" maxlength="4096">
+      <p id="key-note" class="field-note">密钥仅用于本机服务请求，不写入浏览器存储或项目文件。</p>
+      <label for="model-name">模型名称</label>
+      <input id="model-name" required placeholder="填写服务提供的模型名称" spellcheck="false" maxlength="200">
+      <label for="base-url">API 服务地址</label>
+      <input id="base-url" type="url" required value="https://api.openai.com/v1" spellcheck="false" maxlength="2000">
+      <p class="field-note">填写服务商的基础地址，也支持粘贴完整接口地址。</p>
+      <label for="api-style">接口协议</label>
+      <select id="api-style"><option value="auto">自动选择（推荐）</option><option value="chat_completions">Chat Completions 兼容接口</option><option value="responses">OpenAI Responses 接口</option></select>
+      <p id="settings-status" class="settings-status" role="status" aria-live="polite"></p>
+      <div class="dialog-footer"><button id="use-demo" type="button" class="secondary">使用离线演示</button><button id="apply-settings" type="submit" class="primary">验证并进入</button></div>
+    </form>
+  </dialog>
   <main>
     <section class="intro"><p class="eyebrow">代码审查助手</p><h1>让每一条建议<br>都有代码证据。</h1>
       <p class="lead">读懂代码，定位风险，验证测试。<br>从工具调用到审查结果，过程清晰可见。</p>
@@ -17,12 +35,14 @@
     <section class="workspace" aria-label="审查工作区">
       <div class="section-head"><h2>开始一次审查</h2><button type="button" id="reset" class="quiet">新建会话</button></div>
       <form id="review-form">
-        <label for="target">目标文件或目录</label>
+        <label for="target">本地文件或目录</label>
         <input id="target" name="target" value="examples/buggy" required maxlength="1000" spellcheck="false">
+        <div class="picker-actions"><button id="pick-file" type="button" class="secondary">选择文件</button><button id="pick-directory" type="button" class="secondary">选择文件夹</button></div>
+        <p id="selection-note" class="field-note">可选择电脑上的代码，也可粘贴绝对路径。</p>
         <div class="examples"><button type="button" data-target="examples/buggy">含缺陷示例</button><button type="button" data-target="examples/fixed">修复后示例</button></div>
         <label for="task">你希望检查什么？</label>
         <textarea id="task" name="task" rows="3" required maxlength="4000">审查代码，指出潜在问题，并验证测试。</textarea>
-        <div class="form-footer"><p id="exec-note">正在检查工具配置…</p><button id="run" type="submit">开始审查 <span>↗</span></button></div>
+        <div class="form-footer"><p id="exec-note">正在检查工具配置…</p><button id="run" type="submit" disabled>开始审查 <span>↗</span></button></div>
       </form>
       <p id="status" role="status" aria-live="polite">输入目标与问题，开始审查。</p>
     </section>

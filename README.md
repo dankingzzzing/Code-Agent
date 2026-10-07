@@ -12,10 +12,12 @@ Homework 1 · **2412190104 唐佳杰**
 
 ```powershell
 python -m code_agent review examples/buggy --demo --allow-exec --trace
-python -m code_agent serve --demo --allow-exec
+python -m code_agent serve --allow-exec
 ```
 
-打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。点击“含缺陷示例”开始审查，再选择“修复后示例”对比结果。
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，首先会弹出“连接你的模型”窗口。填写 API Key、模型名称与服务地址，点击“验证并进入”；没有密钥时可点击“使用离线演示”。Web 服务启动不再要求预先配置 `.env`。
+
+进入页面后，点击“选择文件”或“选择文件夹”，通过电脑的系统窗口选择任意本地项目；也可以粘贴绝对路径。选中目录自动成为当前审查工作区，选中单个文件则使用其所在目录。点击“含缺陷示例”或“修复后示例”可返回内置演示。
 
 ![代码审查助手 Web 界面](docs/assets/web-home.png)
 
@@ -32,6 +34,8 @@ python -m code_agent serve --demo --allow-exec
 | 工具 | `list_files`、`read_file`、`analyze_python`、可选 `run_tests` |
 | 审查证据 | 文件、行号、规则、严重程度、触发条件和修复建议 |
 | 交互 | 批量 CLI、带记忆的交互聊天、本机 Web |
+| 网页模型设置 | 启动弹窗，填写密钥/模型/服务地址，真实验证工具调用与结果回传 |
+| 本地选择 | 系统文件/文件夹选择器，支持启动目录以外的项目和绝对路径 |
 | 上下文记忆 | 保留完整工具调用轮次，可保存并继续 CLI 会话 |
 | 错误处理 | 工具错误作为观察返回；临时 API 错误重试；失败轮次不污染记忆 |
 | 可观察性 | `--trace` 行动轨迹，`--json` 结构化导出，Web 报告下载 |
@@ -39,19 +43,27 @@ python -m code_agent serve --demo --allow-exec
 
 ## 配置真实 LLM
 
+**网页推荐方式**：直接运行 `python -m code_agent serve --allow-exec`，在启动弹窗中填写配置。接口协议默认“自动选择”；第三方兼容服务优先选择 Chat Completions，OpenAI 官方服务选择 Responses。可以随时点击页面右上角“模型设置”重新配置。更改模型或目录会开启新的审查会话。
+
+“验证并进入”会实际检查一次工具调用和一次工具结果回传，确认 Agent 能工作，而不仅是模型能返回文本。失败时弹窗会显示经密钥脱敏的服务错误，保留所填配置供修改。
+
+网页填写的密钥只保存在当前本机服务内存中，不写入 `.env`、浏览器存储或仓库。启动目录已有 `.env` 时，网页可沿用其中的密钥（不会回显），并预填服务地址和模型。选中其他代码目录后，不加载那个目录的 `.env`。更换服务地址需要重新填写对应密钥。
+
+**命令行方式**仍支持 `.env`：
+
 复制配置模板：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中填入自己的密钥、可用模型和服务基础地址。环境变量优先于 `.env`；密钥只用于服务端 API 请求，不会写入报告或浏览器。
+在 `.env` 中填入自己的密钥、可用模型和服务基础地址。环境变量优先于 `.env`；密钥只用于服务端 API 请求，不会写入报告或浏览器存储。
 
 ```dotenv
 LLM_API_KEY=填入你的密钥
 LLM_MODEL=填入支持工具调用的模型名
 LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_STYLE=responses
+LLM_API_STYLE=auto
 ```
 
 然后运行，**省略 `--demo`**：
@@ -64,9 +76,9 @@ python -m code_agent serve --allow-exec
 
 `doctor` 检查配置是否齐全，不发送请求，也不验证密钥有效性。
 
-OpenAI 原生模型使用 `responses`。对于明确提供 Chat Completions 工具调用协议的服务，使用 `LLM_API_STYLE=chat_completions`，并将 `LLM_BASE_URL` 改为服务商文档中的基础地址。模型必须支持 function calling；两种 API 不能仅凭更换模型名互换。接口实现依据 [OpenAI 官方 Function Calling 文档](https://developers.openai.com/api/docs/guides/function-calling)。
+`LLM_API_STYLE=auto` 根据服务地址选择协议；也可显式配置为 `responses` 或 `chat_completions`。基础地址或完整 `/chat/completions`、`/responses` 地址都可输入，应用会规范化路径。模型必须支持 function calling；两种 API 不能仅凭更换模型名互换。接口实现依据 [OpenAI 官方 Function Calling 文档](https://developers.openai.com/api/docs/guides/function-calling)。
 
-没有配置密钥时，真实模式明确报错，**不会自动伪装为 LLM 或悄悄回退到离线模式**。本次交付未提供真实模型密钥；API 协议、重试和 HTTP 发送通过本机模拟服务验证，真实云端调用需要用户配置后验证。
+没有配置密钥时，网页仍正常启动并提供配置弹窗，CLI 真实审查模式明确报错。应用不会自动回退到离线模式。本次更新已用本机已有的用户配置验证真实模型工具调用和代码审查；常规自动测试使用模拟服务，不携带密钥。
 
 ## 命令行用法
 
@@ -131,10 +143,11 @@ code_agent/
   analysis.py     Python 静态规则
   memory.py       完整轮次记忆和本地持久化
   prompts.py      系统提示与 few-shot 示例
-  config.py       环境配置和校验
+  config.py       环境/网页配置、接口规范化和校验
   app.py          共享装配入口
   cli.py          命令行与多轮聊天
-  web.py          本机 HTTP 服务
+  web.py          本机 HTTP 服务、模型设置与审查目录切换
+  file_picker.py  独立进程中的系统文件/目录选择器
   static/         无外部依赖的 Web 界面
 examples/         含缺陷 / 修复示例
 tests/            项目自动测试
@@ -143,5 +156,3 @@ scripts/          提交包生成脚本
 ```
 
 完整设计见 [DESIGN.md](DESIGN.md)。PPT 将设计文档拼写为 `Desgin.md`，本仓库也提供同名入口。[要求逐项对应](docs/REQUIREMENTS.md)说明各评分项的实现位置。
-
-

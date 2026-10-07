@@ -39,11 +39,11 @@ class InterfaceTests(unittest.TestCase):
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
 
-        def post(payload, token="", host=None):
+        def post(payload, token="", host=None, route="/api/review"):
             headers = {"Content-Type": "application/json", "X-Agent-Token": token}
             if host:
                 headers["Host"] = host
-            request = Request(base + "/api/review", data=json.dumps(payload).encode(), headers=headers)
+            request = Request(base + route, data=json.dumps(payload).encode(), headers=headers)
             return urlopen(request, timeout=5)
 
         try:
@@ -56,12 +56,15 @@ class InterfaceTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as captured:
                 post(payload)
             self.assertEqual(captured.exception.code, 403)
+            with post({"demo": True}, config["csrf_token"], route="/api/settings") as response:
+                payload["profile"] = json.load(response)["profile"]
             with post(payload, config["csrf_token"]) as response:
                 first = json.load(response)
             self.assertEqual(first["status"], "completed")
             with post({**payload, "session": first["session"]}, config["csrf_token"]) as response:
                 self.assertEqual(json.load(response)["session"], first["session"])
-            for invalid in ({"task": "", "target": "demo.py"}, {"task": "q", "target": "../outside"}, []):
+            for invalid in ({"task": "", "target": "demo.py", "profile": payload["profile"]},
+                            {"task": "q", "target": "../outside", "profile": payload["profile"]}, []):
                 with self.assertRaises(HTTPError) as captured:
                     post(invalid, config["csrf_token"])
                 self.assertEqual(captured.exception.code, 400)

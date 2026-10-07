@@ -66,3 +66,23 @@ class MemoryConfigTests(unittest.TestCase):
     def test_missing_key_is_explicit(self):
         with self.assertRaises(ConfigError):
             Config().require_llm()
+
+    def test_auto_protocol_and_full_endpoint_normalization(self):
+        for url, expected in (("https://api.openai.com/v1", "responses"),
+                              ("https://compatible.example/v1", "chat_completions"),
+                              ("https://compatible.example/v1/chat/completions", "chat_completions"),
+                              ("https://compatible.example/v1/responses", "responses")):
+            config = Config.from_values({"LLM_BASE_URL": url, "LLM_API_STYLE": "auto"})
+            self.assertEqual(config.resolved_api_style, expected)
+            self.assertFalse(config.base_url.endswith(("/chat/completions", "/responses")))
+
+    def test_web_settings_keep_secret_on_same_service_and_validate_changes(self):
+        current = Config(api_key="existing-secret", model="old", base_url="https://compatible.example/v1")
+        changed = current.with_web_settings({"api_key": "", "model": "new", "api_style": "auto"})
+        self.assertEqual(changed.api_key, "existing-secret")
+        self.assertEqual(changed.model, "new")
+        with self.assertRaises(ConfigError):
+            current.with_web_settings({"base_url": "https://another.example/v1", "api_key": ""})
+        for values in ({"model": 1}, {"api_key": None}, {"extra": "bad"}):
+            with self.assertRaises(ConfigError):
+                current.with_web_settings(values)

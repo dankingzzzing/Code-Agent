@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "homework1-code-review-agent"
-version = "1.0.0"
+version = "1.1.0"
 description = "A small, observable code review agent with native LLM tool calling and an offline demo."
 requires-python = ">=3.10"
 dependencies = []

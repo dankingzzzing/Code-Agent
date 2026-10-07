@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 
 from code_agent.config import Config
 from code_agent.errors import ProviderError
-from code_agent.providers import LLMProvider, ToolCall
+from code_agent.providers import LLMProvider, Reply, ToolCall
 
 
 class ProviderTests(unittest.TestCase):
@@ -57,6 +57,44 @@ class ProviderTests(unittest.TestCase):
     def test_duplicate_ids_rejected(self):
         with self.assertRaises(ProviderError):
             self.provider()._validate_calls([ToolCall("c", "a", "{}"), ToolCall("c", "b", "{}")])
+
+    def test_no_tool_choice_without_tools(self):
+        provider = self.provider()
+        with patch.object(provider, "_post", return_value={"choices": [{"message": {"content": "OK"}}]}) as post:
+            provider.complete([{"role": "user", "content": "test"}], [])
+        self.assertNotIn("tool_choice", post.call_args.args[1])
+        self.assertNotIn("tools", post.call_args.args[1])
+
+    def test_reasoning_content_survives_tool_round_trip(self):
+        provider = self.provider()
+        raw = {"choices": [{"message": {"reasoning_content": "opaque vendor reasoning", "content": None,
+               "tool_calls": [{"id": "c", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]}}]}
+        with patch.object(provider, "_post", return_value=raw):
+            reply = provider.complete([{"role": "user", "content": "q"}], [])
+        self.assertEqual(reply.message()["reasoning_content"], "opaque vendor reasoning")
+
+    def test_connection_checks_both_tool_call_and_tool_result(self):
+        provider = self.provider()
+        replies = [Reply(calls=[ToolCall("c", "connection_check", '{"value":"OK"}')]), Reply("OK")]
+        with patch.object(provider, "complete", side_effect=replies) as complete:
+            result = provider.check_connection()
+        self.assertTrue(result["tool_calling"])
+        self.assertEqual(complete.call_args.args[0][-1]["role"], "tool")
+        with patch.object(provider, "complete", return_value=Reply("I cannot call tools")):
+            with self.assertRaises(ProviderError):
+                provider.check_connection()
+
+    def test_error_body_is_actionable_and_redacted(self):
+        provider = self.provider()
+        body = json.dumps({"error": {"message": "Bad model; key test-key; Bearer other-secret"}}).encode()
+        failure = HTTPError("https://example", 400, "bad", {}, io.BytesIO(body))
+        with patch.object(provider.opener, "open", side_effect=failure):
+            with self.assertRaises(ProviderError) as captured:
+                provider._post("chat/completions", {})
+        message = str(captured.exception)
+        self.assertIn("Bad model", message)
+        self.assertNotIn("test-key", message)
+        self.assertNotIn("other-secret", message)
 
     def test_transient_http_and_network_retry(self):
         for failure in (HTTPError("https://example", 429, "rate limit", {"Retry-After": "0"}, io.BytesIO(b"")),

@@ -7,7 +7,7 @@ import random
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Protocol
 from urllib.error import HTTPError, URLError
@@ -33,6 +33,15 @@ class Reply:
     content: str = ""
     calls: list[ToolCall] = field(default_factory=list)
     provider_items: list[dict] | None = None
+    provider_fields: dict = field(default_factory=dict)
+
+    def message(self) -> dict:
+        message = {"role": "assistant", "content": self.content or None, **self.provider_fields}
+        if self.calls:
+            message["tool_calls"] = [call.wire() for call in self.calls]
+        if self.provider_items is not None:
+            message["_provider_items"] = self.provider_items
+        return message
 
 
 class Provider(Protocol):
@@ -52,8 +61,8 @@ class LLMProvider:
 
     def __init__(self, config: Config, *, sleeper=time.sleep):
         config.require_llm()
-        self.config = config
-        self.identity = f"llm:{config.api_style}:{config.base_url}:{config.model}"
+        self.config = replace(config, api_style=config.resolved_api_style)
+        self.identity = f"llm:{self.config.api_style}:{config.base_url}:{config.model}"
         self.label = f"LLM · {config.model}"
         self.sleeper = sleeper
         self.opener = build_opener(_NoRedirect())
@@ -79,7 +88,9 @@ class LLMProvider:
                     hints = {401: "请检查 API key。", 403: "请检查模型和接口权限。",
                              404: "请检查 LLM_BASE_URL、模型名和 LLM_API_STYLE。",
                              400: "请检查模型是否支持所选 API 和 function calling。"}
-                    raise ProviderError(f"LLM HTTP {exc.code}。{hints.get(exc.code, '重试次数已用完。')}") from exc
+                    detail = self._error_detail(exc)
+                    hint = hints.get(exc.code, "模型服务暂不可用，重试次数已用完。")
+                    raise ProviderError(f"LLM HTTP {exc.code}。{hint}{detail}") from exc
                 try:
                     delay = max(0, min(float(exc.headers.get("Retry-After", "0")), 5))
                 except (ValueError, TypeError):
@@ -93,6 +104,45 @@ class LLMProvider:
             except (ValueError, UnicodeError) as exc:
                 raise ProviderError("模型服务返回的内容不是有效 UTF-8 JSON。") from exc
         raise ProviderError("LLM 请求失败。")
+
+    def _error_detail(self, error: HTTPError) -> str:
+        try:
+            payload = json.loads(error.read(4096))
+            value = payload.get("error", payload)
+            detail = value.get("message", value.get("msg", "")) if isinstance(value, dict) else value
+            if not isinstance(detail, str):
+                return ""
+            detail = detail.replace(self.config.api_key, "[已隐藏密钥]")
+            detail = re.sub(r"(?i)bearer\s+\S+", "Bearer [已隐藏密钥]", detail)
+            return " 服务提示：" + " ".join(detail.split())[:400] if detail else ""
+        except (OSError, ValueError, AttributeError):
+            return ""
+        finally:
+            error.close()
+
+    def check_connection(self) -> dict:
+        """Check the actual tool call and tool-result round trip, without local file access."""
+        tool = {"type": "function", "function": {"name": "connection_check",
+                "description": "Check the connection. Call this once with value OK.", "strict": True,
+                "parameters": {"type": "object", "properties": {"value": {"type": "string"}},
+                               "required": ["value"], "additionalProperties": False}}}
+        messages = [{"role": "system", "content": "This is a connection test. You must call connection_check once with value OK, then reply OK after its result. Do not use other tools."},
+                    {"role": "user", "content": "Call connection_check now."}]
+        reply = self.complete(messages, [tool])
+        if len(reply.calls) != 1 or reply.calls[0].name != "connection_check":
+            raise ProviderError("模型未返回验证工具调用。请检查该模型是否支持工具调用，或切换 API 协议。")
+        call = reply.calls[0]
+        try:
+            if json.loads(call.arguments) != {"value": "OK"}:
+                raise ValueError("unexpected arguments")
+        except ValueError as exc:
+            raise ProviderError("模型返回的验证工具参数无效。") from exc
+        messages.extend([reply.message(), {"role": "tool", "tool_call_id": call.id, "content": "OK"}])
+        final = self.complete(messages, [tool])
+        if not final.content or final.calls:
+            raise ProviderError("模型没有完成验证工具结果的处理，请检查模型或 API 协议。")
+        return {"connected": True, "tool_calling": True, "api_style": self.config.api_style,
+                "model": self.config.model}
 
     def complete(self, messages: list[dict], tools: list[dict]) -> Reply:
         if self.config.api_style == "responses":
@@ -111,8 +161,9 @@ class LLMProvider:
 
     def _chat(self, messages: list[dict], tools: list[dict]) -> Reply:
         cleaned = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
-        payload = {"model": self.config.model, "messages": cleaned, "tools": tools,
-                   "tool_choice": "auto"}
+        payload = {"model": self.config.model, "messages": cleaned}
+        if tools:
+            payload.update(tools=tools, tool_choice="auto")
         value = self._post("chat/completions", payload)
         try:
             choice = value["choices"][0]
@@ -127,7 +178,10 @@ class LLMProvider:
                 raise ValueError("invalid calls")
             calls = [ToolCall(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in raw_calls]
             self._validate_calls(calls)
-            return Reply(content=content, calls=calls)
+            fields = {}
+            if isinstance(message.get("reasoning_content"), str):
+                fields["reasoning_content"] = message["reasoning_content"]
+            return Reply(content=content, calls=calls, provider_fields=fields)
         except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderError("Chat Completions 响应格式无效。") from exc
 

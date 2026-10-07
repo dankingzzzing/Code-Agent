@@ -69,11 +69,7 @@ class CodeReviewAgent:
             reply = self.provider.complete(messages, self.tools.schemas())
             if not reply.content and not reply.calls:
                 raise ProviderError("模型返回了空响应，请重试或检查模型配置。")
-            assistant = {"role": "assistant", "content": reply.content or None}
-            if reply.calls:
-                assistant["tool_calls"] = [call.wire() for call in reply.calls]
-            if reply.provider_items is not None:
-                assistant["_provider_items"] = reply.provider_items
+            assistant = reply.message()
             messages.append(assistant)
             turn.append(assistant)
             if not reply.calls:
