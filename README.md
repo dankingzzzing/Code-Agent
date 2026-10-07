@@ -144,10 +144,4 @@ scripts/          提交包生成脚本
 
 完整设计见 [DESIGN.md](DESIGN.md)。PPT 将设计文档拼写为 `Desgin.md`，本仓库也提供同名入口。[要求逐项对应](docs/REQUIREMENTS.md)说明各评分项的实现位置。
 
-## 提交
 
-```powershell
-python scripts/package_submission.py --student-id 2412190104 --name 唐佳杰
-```
-
-生成 `artifacts/2412190104-唐佳杰.zip`，包括代码、文档、测试、示例与演示材料；排除 `.git`、密钥、会话、缓存和临时依赖，并检查压缩包小于 200 MB。将其提交到课程的 `001Homework1`。GitHub 同步不代替课程平台提交。
