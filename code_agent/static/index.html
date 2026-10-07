@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Code Agent · 代码审查助手</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/markdown.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -15,7 +16,7 @@
       <p class="dialog-intro">填写 API Key、模型名称和服务地址，验证成功后开始审查。</p>
       <label for="api-key">API Key</label>
       <input id="api-key" type="password" placeholder="填写你的 API Key" autocomplete="off" spellcheck="false" maxlength="4096">
-      <p id="key-note" class="field-note">密钥仅用于本机服务请求，不写入浏览器存储或项目文件。</p>
+      <p id="key-note" class="field-note">密钥不回显；已保存时留空沿用，更换密钥时重新填写。</p>
       <label for="model-name">模型名称</label>
       <input id="model-name" required placeholder="填写服务提供的模型名称" spellcheck="false" maxlength="200">
       <label for="base-url">API 服务地址</label>
@@ -23,6 +24,8 @@
       <p class="field-note">填写服务商的基础地址，也支持粘贴完整接口地址。</p>
       <label for="api-style">接口协议</label>
       <select id="api-style"><option value="auto">自动选择（推荐）</option><option value="chat_completions">Chat Completions 兼容接口</option><option value="responses">OpenAI Responses 接口</option></select>
+      <label class="remember-option"><input id="remember-settings" type="checkbox" checked> 在本机记住此配置，刷新或重启后自动恢复</label>
+      <p class="field-note">Windows 使用当前用户加密保存密钥；配置不会进入 GitHub 或提交包。</p>
       <p id="settings-status" class="settings-status" role="status" aria-live="polite"></p>
       <div class="dialog-footer"><button id="use-demo" type="button" class="secondary">使用离线演示</button><button id="apply-settings" type="submit" class="primary">验证并进入</button></div>
     </form>
@@ -49,8 +52,10 @@
     <section id="results" class="results" hidden>
       <div class="section-head"><h2>审查结果</h2><button type="button" id="download" class="quiet">下载报告 ↓</button></div>
       <p id="metrics" class="metrics"></p>
+      <div id="live-status" class="live-status" hidden><span id="live-stage">准备审查…</span><span id="live-elapsed">0 秒</span><progress id="review-progress" max="1" value="0"></progress></div>
+      <p id="coverage-summary" class="metrics" hidden></p>
       <div class="result-grid"><article id="report" aria-label="审查报告"></article>
-        <aside><h3>行动轨迹</h3><p class="trace-note">公开操作与工具结果摘要</p><ol id="trace"></ol></aside></div>
+        <aside><h3>实时执行进度</h3><p class="trace-note">检查计划、工具调用和证据核验，执行时即时更新</p><ol id="trace"></ol></aside></div>
     </section>
   </main>
   <footer><span>2412190104 · 唐佳杰</span><span>Python · Native API · Tool Calling</span></footer>

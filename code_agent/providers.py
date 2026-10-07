@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -90,7 +90,7 @@ class LLMProvider:
                              400: "请检查模型是否支持所选 API 和 function calling。"}
                     detail = self._error_detail(exc)
                     hint = hints.get(exc.code, "模型服务暂不可用，重试次数已用完。")
-                    raise ProviderError(f"LLM HTTP {exc.code}。{hint}{detail}") from exc
+                    raise ProviderError(f"LLM HTTP {exc.code}。{hint}{detail}", http_status=exc.code) from exc
                 try:
                     delay = max(0, min(float(exc.headers.get("Retry-After", "0")), 5))
                 except (ValueError, TypeError):
@@ -128,7 +128,7 @@ class LLMProvider:
                                "required": ["value"], "additionalProperties": False}}}
         messages = [{"role": "system", "content": "This is a connection test. You must call connection_check once with value OK, then reply OK after its result. Do not use other tools."},
                     {"role": "user", "content": "Call connection_check now."}]
-        reply = self.complete(messages, [tool])
+        reply = self.stream_complete(messages, [tool], lambda text: None, tool_choice="connection_check")
         if len(reply.calls) != 1 or reply.calls[0].name != "connection_check":
             raise ProviderError("模型未返回验证工具调用。请检查该模型是否支持工具调用，或切换 API 协议。")
         call = reply.calls[0]
@@ -138,7 +138,7 @@ class LLMProvider:
         except ValueError as exc:
             raise ProviderError("模型返回的验证工具参数无效。") from exc
         messages.extend([reply.message(), {"role": "tool", "tool_call_id": call.id, "content": "OK"}])
-        final = self.complete(messages, [tool])
+        final = self.stream_complete(messages, [tool], lambda text: None, tool_choice="none")
         if not final.content or final.calls:
             raise ProviderError("模型没有完成验证工具结果的处理，请检查模型或 API 协议。")
         return {"connected": True, "tool_calling": True, "api_style": self.config.api_style,
@@ -148,6 +148,117 @@ class LLMProvider:
         if self.config.api_style == "responses":
             return self._responses(messages, tools)
         return self._chat(messages, tools)
+
+    def stream_complete(self, messages: list[dict], tools: list[dict], on_text: Callable[[str], None],
+                        *, on_activity: Callable[[], None] | None = None, tool_choice: str | None = None) -> Reply:
+        """Stream public answer text; keep provider reasoning private to protocol state."""
+        try:
+            return self._stream_complete(messages, tools, on_text, on_activity, tool_choice)
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderError("模型流式响应格式无效。") from exc
+
+    def _stream_complete(self, messages, tools, on_text, on_activity, tool_choice):
+        if self.config.api_style == "responses":
+            payload = self._responses_payload(messages, tools)
+            if tool_choice:
+                payload["tool_choice"] = (tool_choice if tool_choice in {"none", "auto", "required"}
+                                          else {"type": "function", "name": tool_choice})
+            payload["stream"] = True
+            final = None
+            for event in self._stream_events("responses", payload):
+                if on_activity:
+                    on_activity()
+                if event.get("type") == "response.output_text.delta":
+                    delta = event.get("delta", "")
+                    if not isinstance(delta, str):
+                        raise ValueError("invalid text delta")
+                    on_text(delta)
+                elif event.get("type") == "response.completed":
+                    final = event["response"]
+                elif event.get("type") in {"error", "response.failed", "response.incomplete"}:
+                    raise ProviderError("模型流式响应失败或未完整生成。")
+            if final is None:
+                raise ProviderError("模型流中缺少完成事件。")
+            return self._parse_responses(final)
+        payload = self._chat_payload(messages, tools)
+        if tool_choice:
+            payload["tool_choice"] = (tool_choice if tool_choice in {"none", "auto", "required"}
+                                      else {"type": "function", "function": {"name": tool_choice}})
+        payload["stream"] = True
+        text, reasoning, calls = [], [], {}
+        finished = False
+        for event in self._stream_events("chat/completions", payload):
+            if on_activity:
+                on_activity()
+            if event.get("error"):
+                raise ProviderError("模型流式响应返回了服务错误。")
+            for choice in event.get("choices", []):
+                finish = choice.get("finish_reason")
+                if finish in {"length", "content_filter"}:
+                    raise ProviderError("模型流式输出被截断或过滤。")
+                finished = finished or finish is not None
+                delta = choice.get("delta", {})
+                if isinstance(delta.get("content"), str):
+                    text.append(delta["content"])
+                    on_text(delta["content"])
+                if isinstance(delta.get("reasoning_content"), str):
+                    reasoning.append(delta["reasoning_content"])
+                for fragment in delta.get("tool_calls") or []:
+                    index = fragment["index"]
+                    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 12:
+                        raise ValueError("invalid tool index")
+                    call = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    call["id"] += fragment.get("id") or ""
+                    function = fragment.get("function", {})
+                    call["name"] += function.get("name") or ""
+                    call["arguments"] += function.get("arguments") or ""
+        if not finished:
+            raise ProviderError("模型流提前断开，未获得完整报告。")
+        assembled = [ToolCall(**calls[i]) for i in sorted(calls)]
+        self._validate_calls(assembled)
+        return Reply("".join(text), assembled, provider_fields={"reasoning_content": "".join(reasoning)} if reasoning else {})
+
+    def _stream_events(self, endpoint: str, payload: dict):
+        request = Request(f"{self.config.base_url}/{endpoint}", data=json.dumps(payload, ensure_ascii=False).encode(),
+                          headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                                   "Authorization": f"Bearer {self.config.api_key}"}, method="POST")
+        response = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = self.opener.open(request, timeout=self.config.timeout)
+                break
+            except HTTPError as exc:
+                retry = exc.code in {408, 429, 500, 502, 503, 504} and attempt < self.config.max_retries
+                if not retry:
+                    detail = self._error_detail(exc)
+                    raise ProviderError(f"LLM HTTP {exc.code}。请检查密钥、模型及协议。{detail}", http_status=exc.code) from exc
+                exc.close()
+                self.sleeper(min(.5 * 2 ** attempt, 5))
+            except (URLError, TimeoutError, OSError) as exc:
+                if attempt == self.config.max_retries:
+                    raise ProviderError("无法连接模型服务或请求超时。") from exc
+                self.sleeper(min(.5 * 2 ** attempt, 5))
+        total, data = 0, []
+        try:
+            with response:
+                for raw in response:
+                    total += len(raw)
+                    if total > 4 * 1024 * 1024 or len(raw) > 1024 * 1024:
+                        raise ProviderError("模型流超过输出大小上限。")
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data.append(line[5:].lstrip())
+                    elif not line and data:
+                        value = "\n".join(data)
+                        data = []
+                        if value == "[DONE]":
+                            break
+                        parsed = json.loads(value)
+                        if not isinstance(parsed, dict):
+                            raise ValueError("invalid stream event")
+                        yield parsed
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ProviderError("模型流传输中断或响应格式无效。") from exc
 
     @staticmethod
     def _validate_calls(calls: list[ToolCall]) -> None:
@@ -159,12 +270,15 @@ class LLMProvider:
                     or len(call.arguments) > 20000):
                 raise ProviderError("模型返回了无效的工具调用格式。")
 
-    def _chat(self, messages: list[dict], tools: list[dict]) -> Reply:
+    def _chat_payload(self, messages: list[dict], tools: list[dict]) -> dict:
         cleaned = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
         payload = {"model": self.config.model, "messages": cleaned}
         if tools:
             payload.update(tools=tools, tool_choice="auto")
-        value = self._post("chat/completions", payload)
+        return payload
+
+    def _chat(self, messages: list[dict], tools: list[dict]) -> Reply:
+        value = self._post("chat/completions", self._chat_payload(messages, tools))
         try:
             choice = value["choices"][0]
             if choice.get("finish_reason") in {"length", "content_filter"}:
@@ -185,7 +299,7 @@ class LLMProvider:
         except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderError("Chat Completions 响应格式无效。") from exc
 
-    def _responses(self, messages: list[dict], tools: list[dict]) -> Reply:
+    def _responses_payload(self, messages: list[dict], tools: list[dict]) -> dict:
         inputs = []
         for message in messages:
             if message["role"] == "system":
@@ -203,7 +317,12 @@ class LLMProvider:
         payload = {"model": self.config.model, "instructions": messages[0]["content"],
                    "input": inputs, "tools": native_tools, "tool_choice": "auto", "store": False,
                    "include": ["reasoning.encrypted_content"]}
-        value = self._post("responses", payload)
+        return payload
+
+    def _responses(self, messages: list[dict], tools: list[dict]) -> Reply:
+        return self._parse_responses(self._post("responses", self._responses_payload(messages, tools)))
+
+    def _parse_responses(self, value: dict) -> Reply:
         if value.get("status") in {"failed", "incomplete", "cancelled"} or value.get("error"):
             raise ProviderError("Responses API 未完整生成结果。请检查模型、输入长度或服务状态。")
         try:

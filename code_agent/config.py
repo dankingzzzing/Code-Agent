@@ -51,6 +51,8 @@ class Config:
     max_tool_calls: int = 32
     memory_turns: int = 6
     test_timeout: float = 10
+    project_max_files: int = 40
+    project_max_chars: int = 500000
 
     @classmethod
     def from_env(cls, root: Path) -> "Config":
@@ -97,6 +99,8 @@ class Config:
             max_tool_calls=number("AGENT_MAX_TOOL_CALLS", 32, 1, 100),
             memory_turns=number("AGENT_MEMORY_TURNS", 6, 1, 20),
             test_timeout=number("AGENT_TEST_TIMEOUT", 10.0, 0.1, 60),
+            project_max_files=number("AGENT_PROJECT_MAX_FILES", 40, 1, 200),
+            project_max_chars=number("AGENT_PROJECT_MAX_CHARS", 500000, 10000, 2000000),
         )
 
     @property
@@ -113,7 +117,8 @@ class Config:
         mapping = {"api_key": "LLM_API_KEY", "model": "LLM_MODEL", "base_url": "LLM_BASE_URL",
                    "api_style": "LLM_API_STYLE", "timeout": "LLM_TIMEOUT", "max_retries": "LLM_MAX_RETRIES",
                    "max_steps": "AGENT_MAX_STEPS", "max_tool_calls": "AGENT_MAX_TOOL_CALLS",
-                   "memory_turns": "AGENT_MEMORY_TURNS", "test_timeout": "AGENT_TEST_TIMEOUT"}
+                   "memory_turns": "AGENT_MEMORY_TURNS", "test_timeout": "AGENT_TEST_TIMEOUT",
+                   "project_max_files": "AGENT_PROJECT_MAX_FILES", "project_max_chars": "AGENT_PROJECT_MAX_CHARS"}
         merged = {mapping[key]: value for key, value in current.items()}
         for key, value in values.items():
             if key == "api_key" and not value.strip():

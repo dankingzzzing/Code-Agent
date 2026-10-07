@@ -1,4 +1,4 @@
-"""Local Web UI with in-memory model configuration and explicit desktop selections."""
+"""Local Web UI with protected remembered settings, live progress and desktop selections."""
 
 from __future__ import annotations
 
@@ -6,16 +6,18 @@ import json
 import secrets
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .agent import CodeReviewAgent
 from .app import create_agent
 from .config import Config
-from .errors import AgentError, ConfigError
+from .errors import AgentError, ConfigError, ProviderError
 from .file_picker import pick_local_path
 from .providers import LLMProvider
+from .settings_store import SettingsStore
 from .tools import ToolRegistry, is_private_path
 
 STATIC = Path(__file__).parent / "static"
@@ -38,6 +40,7 @@ class BrowserProfile:
     config: Config = field(repr=False)
     demo: bool = False
     selections: dict[str, Selection] = field(default_factory=dict)
+    remembered: bool = False
 
 
 @dataclass
@@ -76,6 +79,14 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
     except ConfigError as exc:
         defaults = Config()
         bootstrap_error = str(exc)
+    store = SettingsStore(root)
+    remembered_settings = None
+    try:
+        remembered_settings = store.load()
+        if remembered_settings:
+            defaults = remembered_settings[0]
+    except ConfigError as exc:
+        bootstrap_error = str(exc)
     token = secrets.token_urlsafe(32)
     profiles: dict[str, BrowserProfile] = {}
     sessions: dict[str, WebSession] = {}
@@ -86,13 +97,15 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
         def log_message(self, format, *args):
             pass
 
-        def _send(self, status, body, content_type="application/json; charset=utf-8"):
+        def _send(self, status, body, content_type="application/json; charset=utf-8", cookie=None):
             if not isinstance(body, bytes):
                 body = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            if cookie:
+                self.send_header("Set-Cookie", f"code_agent_profile={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'")
             self.end_headers()
@@ -106,12 +119,30 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
             if not self._valid_host():
                 return self._send(403, {"error": "无效的本机 Host。"})
             if self.path == "/api/config":
-                return self._send(200, {"mode": "请先配置模型", "demo": demo, "allow_exec": allow_exec,
-                    "csrf_token": token, "api_key_configured": bool(defaults.api_key),
-                    "model": defaults.model, "base_url": defaults.base_url, "api_style": "auto",
-                    "root": str(root), "bootstrap_error": bootstrap_error})
+                cookies = SimpleCookie()
+                try:
+                    cookies.load(self.headers.get("Cookie", ""))
+                except Exception:
+                    pass
+                profile_id = cookies["code_agent_profile"].value if "code_agent_profile" in cookies else None
+                with state_lock:
+                    profile = profiles.get(profile_id)
+                    if profile is None and remembered_settings:
+                        profile_id = uuid.uuid4().hex
+                        profile = BrowserProfile(remembered_settings[0], remembered_settings[1], remembered=True)
+                        profiles[profile_id] = profile
+                    current = profile.config if profile else defaults
+                current_demo = profile.demo if profile else demo
+                label = ("离线演示 · 规则规划器（非 LLM）" if current_demo else f"LLM · {current.model}") if profile else "请先配置模型"
+                return self._send(200, {"mode": label, "demo": current_demo, "allow_exec": allow_exec,
+                    "csrf_token": token, "api_key_configured": bool(current.api_key),
+                    "model": current.model, "base_url": current.base_url, "api_style": current.api_style,
+                    "profile": profile_id if profile else None, "configured": bool(profile),
+                    "remembered": profile.remembered if profile else False,
+                    "root": str(root), "bootstrap_error": bootstrap_error}, cookie=profile_id if profile else None)
             routes = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                      "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8")}
             if self.path not in routes:
                 return self._send(404, {"error": "页面不存在。"})
@@ -126,11 +157,13 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                 return profile_id, profiles[profile_id]
 
         def _settings(self, payload):
-            if set(payload) - {"profile", "api_key", "model", "base_url", "api_style", "demo", "verify"}:
+            nonlocal remembered_settings
+            if set(payload) - {"profile", "api_key", "model", "base_url", "api_style", "demo", "verify", "remember"}:
                 raise AgentError("模型配置字段无效。")
             demo_mode = payload.get("demo", False)
             verify = payload.get("verify", False)
-            if not isinstance(demo_mode, bool) or not isinstance(verify, bool):
+            remember = payload.get("remember", True)
+            if not isinstance(demo_mode, bool) or not isinstance(verify, bool) or not isinstance(remember, bool):
                 raise AgentError("模型模式格式无效。")
             profile_id = payload.get("profile")
             with state_lock:
@@ -144,6 +177,13 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                 config.require_llm()
                 if verify:
                     connection = LLMProvider(config).check_connection()
+            remembered = remember and (demo_mode or verify)
+            if remembered:
+                store.save(config, demo_mode)
+                remembered_settings = (config, demo_mode)
+            elif not remember:
+                store.clear()
+                remembered_settings = None
             with state_lock:
                 if not profile_id:
                     if len(profiles) >= 64:
@@ -155,10 +195,12 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                     profiles[profile_id].demo = demo_mode
                     for session_id in [s for s, record in sessions.items() if record.profile == profile_id]:
                         del sessions[session_id]
+                profiles[profile_id].remembered = remembered
             label = "离线演示 · 规则规划器（非 LLM）" if demo_mode else f"LLM · {config.model}"
             return {"profile": profile_id, "mode": label, "demo": demo_mode,
                     "api_style": config.resolved_api_style, "api_key_configured": bool(config.api_key),
-                    "base_url": config.base_url, "model": config.model, "connection": connection}
+                    "base_url": config.base_url, "model": config.model, "connection": connection,
+                    "remembered": remembered}
 
         def _select(self, payload, native=False):
             allowed = {"profile", "kind"} if native else {"profile", "path"}
@@ -185,7 +227,7 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                 profile.selections[selected.id] = selected
             return 200, {**selected.public(), "cancelled": False}
 
-        def _review(self, payload):
+        def _review(self, payload, on_event=None, on_text=None):
             if set(payload) - {"task", "target", "session", "profile", "selection"}:
                 raise AgentError("请求格式无效。")
             profile_id, profile = self._profile(payload)
@@ -215,7 +257,8 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
             if not record.lock.acquire(blocking=False):
                 return 409, {"error": "该会话正在审查，请等待结果。"}
             try:
-                result = record.agent.run(payload.get("task"), payload.get("target", selected.target))
+                result = record.agent.run(payload.get("task"), payload.get("target", selected.target),
+                                          on_event=on_event, on_text=on_text)
             except Exception:
                 if payload.get("session") is None:
                     with state_lock:
@@ -225,11 +268,40 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                 record.lock.release()
             return 200, {**result.to_dict(), "session": session_id, "workspace": str(selected.root)}
 
+        def _stream_review(self, payload):
+            # Validate the profile before sending a successful streaming response.
+            self._profile(payload)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
+            def send(kind, data):
+                self.wfile.write((json.dumps({"type": kind, "data": data}, ensure_ascii=False) + "\n").encode())
+                self.wfile.flush()
+
+            try:
+                status, result = self._review(payload,
+                    on_event=lambda event: send("event", asdict(event)),
+                    on_text=lambda value: send("text", value))
+                send("result" if status == 200 else "error", result)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except (AgentError, ValueError, OSError) as exc:
+                try:
+                    send("error", {"error": str(exc), "needs_settings": isinstance(exc, ProviderError)
+                                    and exc.http_status in {401, 403}})
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
         def do_POST(self):
             if not self._valid_host() or not secrets.compare_digest(
                     self.headers.get("X-Agent-Token", "").encode("utf-8"), token.encode("ascii")):
                 return self._send(403, {"error": "请求验证失败，请刷新本机页面。"})
-            if self.path not in {"/api/settings", "/api/select", "/api/pick", "/api/review"}:
+            if self.path not in {"/api/settings", "/api/select", "/api/pick", "/api/review", "/api/review/stream"}:
                 return self._send(404, {"error": "接口不存在。"})
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
                 return self._send(415, {"error": "请求必须使用 application/json。"})
@@ -242,13 +314,17 @@ def create_server(root: Path, *, demo: bool, allow_exec: bool = False, port: int
                     raise AgentError("请求格式无效。")
                 if self.path == "/api/settings":
                     status, body = 200, self._settings(payload)
+                    return self._send(status, body, cookie=body["profile"])
                 elif self.path in {"/api/select", "/api/pick"}:
                     status, body = self._select(payload, native=self.path == "/api/pick")
+                elif self.path == "/api/review/stream":
+                    return self._stream_review(payload)
                 else:
                     status, body = self._review(payload)
                 return self._send(status, body)
             except (AgentError, ValueError, UnicodeError) as exc:
-                return self._send(400, {"error": str(exc)})
+                return self._send(400, {"error": str(exc), "needs_settings": isinstance(exc, ProviderError)
+                                        and exc.http_status in {401, 403}})
             except OSError:
                 return self._send(500, {"error": "文件或模型服务访问失败，请检查设置。"})
 

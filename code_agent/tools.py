@@ -19,7 +19,7 @@ from .errors import ToolError
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".codeagent", ".qa",
              ".pytest_cache", "dist", "build", "artifacts"}
 TEXT_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h",
-                 ".go", ".rs", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".html", ".css"}
+                 ".go", ".rs", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".html", ".css", ".sql", ".sh"}
 
 
 def is_private_path(path: Path) -> bool:
@@ -82,7 +82,7 @@ class ToolRegistry:
         except (ToolError, OSError, UnicodeError, ValueError) as exc:
             return {"ok": False, "error": str(exc), "tool": name}
 
-    def list_files(self, path: Path) -> dict:
+    def list_files(self, path: Path, max_files: int = 100) -> dict:
         if path.is_file():
             return {"files": [path.relative_to(self.root).as_posix()], "truncated": False}
         paths, examined = [], 0
@@ -91,7 +91,7 @@ class ToolRegistry:
             directory = pending.pop()
             for entry in sorted(directory.iterdir(), key=lambda p: p.name):
                 examined += 1
-                if examined > 5000 or len(paths) >= 100:
+                if examined > 5000 or len(paths) >= max_files:
                     return {"files": sorted(paths), "truncated": True}
                 if is_private_path(entry.relative_to(self.root)) or entry.is_symlink():
                     continue

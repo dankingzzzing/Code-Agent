@@ -76,11 +76,13 @@ class ProviderTests(unittest.TestCase):
     def test_connection_checks_both_tool_call_and_tool_result(self):
         provider = self.provider()
         replies = [Reply(calls=[ToolCall("c", "connection_check", '{"value":"OK"}')]), Reply("OK")]
-        with patch.object(provider, "complete", side_effect=replies) as complete:
+        with patch.object(provider, "stream_complete", side_effect=replies) as complete:
             result = provider.check_connection()
         self.assertTrue(result["tool_calling"])
         self.assertEqual(complete.call_args.args[0][-1]["role"], "tool")
-        with patch.object(provider, "complete", return_value=Reply("I cannot call tools")):
+        self.assertEqual(complete.call_args_list[0].kwargs["tool_choice"], "connection_check")
+        self.assertEqual(complete.call_args_list[1].kwargs["tool_choice"], "none")
+        with patch.object(provider, "stream_complete", return_value=Reply("I cannot call tools")):
             with self.assertRaises(ProviderError):
                 provider.check_connection()
 
@@ -145,3 +147,70 @@ class ProviderTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_chat_stream_assembles_fragmented_calls_and_keeps_reasoning_private(self):
+        provider, visible = self.provider(), []
+        events = [
+            {"choices": [{"delta": {"reasoning_content": "private reasoning", "content": "读取", "tool_calls": [
+                {"index": 0, "id": "c1", "function": {"name": "read_", "arguments": '{"path":'}}]}}]},
+            {"choices": [{"delta": {"content": "文件", "tool_calls": [
+                {"index": 0, "function": {"name": "file", "arguments": '"x.py"}'}}]}, "finish_reason": "tool_calls"}]},
+        ]
+        with patch.object(provider, "_stream_events", return_value=iter(events)) as stream:
+            reply = provider.stream_complete([{"role": "user", "content": "q"}], [], visible.append)
+        self.assertEqual("".join(visible), "读取文件")
+        self.assertNotIn("private reasoning", "".join(visible))
+        self.assertEqual(reply.message()["reasoning_content"], "private reasoning")
+        self.assertEqual(reply.calls[0], ToolCall("c1", "read_file", '{"path":"x.py"}'))
+        self.assertTrue(stream.call_args.args[1]["stream"])
+
+    def test_responses_stream_only_forwards_public_output_text(self):
+        provider, visible = self.provider("responses"), []
+        final = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "report"}]}]}
+        events = [{"type": "response.reasoning_text.delta", "delta": "private"},
+                  {"type": "response.output_text.delta", "delta": "report"},
+                  {"type": "response.completed", "response": final}]
+        with patch.object(provider, "_stream_events", return_value=iter(events)):
+            reply = provider.stream_complete([{"role": "system", "content": "s"}], [], visible.append)
+        self.assertEqual(visible, ["report"])
+        self.assertEqual(reply.content, "report")
+
+    def test_stream_forced_tool_uses_each_protocols_native_choice_shape(self):
+        for style in ("responses", "chat_completions"):
+            provider = self.provider(style)
+            events = ([{"type": "response.completed", "response": {"status": "completed", "output": []}}]
+                      if style == "responses" else [{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+            with patch.object(provider, "_stream_events", return_value=iter(events)) as stream:
+                provider.stream_complete([{"role": "system", "content": "s"}], [], lambda text: None,
+                                         tool_choice="connection_check")
+            choice = stream.call_args.args[1]["tool_choice"]
+            expected = ({"type": "function", "name": "connection_check"} if style == "responses"
+                        else {"type": "function", "function": {"name": "connection_check"}})
+            self.assertEqual(choice, expected)
+
+    def test_stream_rejects_missing_completion_truncation_and_malformed_calls(self):
+        for events in (
+            [{"choices": [{"delta": {"content": "partial"}}]}],
+            [{"choices": [{"delta": {}, "finish_reason": "length"}]}],
+            [{"choices": [{"delta": {"tool_calls": [{"function": {}}]}}]}],
+            [{"choices": None}],
+        ):
+            provider = self.provider()
+            with patch.object(provider, "_stream_events", return_value=iter(events)), self.assertRaises(ProviderError):
+                provider.stream_complete([{"role": "user", "content": "q"}], [], lambda text: None)
+        provider = self.provider("responses")
+        with patch.object(provider, "_stream_events", return_value=iter([])), self.assertRaises(ProviderError):
+            provider.stream_complete([{"role": "system", "content": "s"}], [], lambda text: None)
+
+    def test_sse_transport_parses_crlf_and_does_not_retry_after_partial_content(self):
+        provider = self.provider(retries=2)
+        sse = ': heartbeat\r\nevent: message\r\ndata: {"choices":[{"delta":{"content":"中文"}}]}\r\n\r\n' \
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\r\n\r\ndata: [DONE]\r\n\r\n'
+        with patch.object(provider.opener, "open", return_value=io.BytesIO(sse.encode())) as opened:
+            reply = provider.stream_complete([{"role": "user", "content": "q"}], [], lambda text: None)
+        self.assertEqual(reply.content, "中文")
+        self.assertEqual(opened.call_count, 1)
+        with patch.object(provider.opener, "open", return_value=io.BytesIO(b'data: invalid\n\n')) as opened:
+            with self.assertRaises(ProviderError):
+                provider.stream_complete([{"role": "user", "content": "q"}], [], lambda text: None)
+        self.assertEqual(opened.call_count, 1)

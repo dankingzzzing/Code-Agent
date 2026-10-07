@@ -21,6 +21,7 @@ class Event:
     tool: str | None = None
     arguments: dict | None = None
     ok: bool | None = None
+    progress: float | None = None
 
 
 @dataclass
@@ -31,6 +32,7 @@ class AgentResult:
     steps: int
     tool_calls: int
     events: list[Event] = field(default_factory=list)
+    coverage: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,10 +43,14 @@ class CodeReviewAgent:
                  config: Config):
         self.provider, self.tools, self.memory, self.config = provider, tools, memory, config
 
-    def run(self, task: str, target: str = ".", *, on_event: Callable[[Event], None] | None = None) -> AgentResult:
+    def run(self, task: str, target: str = ".", *, on_event: Callable[[Event], None] | None = None,
+            on_text: Callable[[str], None] | None = None) -> AgentResult:
         if not isinstance(task, str) or not task.strip() or len(task) > 4000:
             raise AgentError("请求必须是 1 至 4000 个字符。")
         resolved = self.tools.resolve(target)
+        if resolved.is_dir():
+            from .project_review import ProjectReviewer
+            return ProjectReviewer(self).run(task, target, on_event=on_event, on_text=on_text)
         normalized = resolved.relative_to(self.tools.root).as_posix()
         user = {"role": "user", "content": json.dumps({"task": task.strip(), "target": normalized}, ensure_ascii=False)}
         messages = self.memory.messages()
@@ -66,7 +72,8 @@ class CodeReviewAgent:
                 emit(step, "limit", "达到上下文字符上限，停止调用模型。")
                 break
             emit(step, "model", "规划下一步操作 / 根据已有证据生成报告。")
-            reply = self.provider.complete(messages, self.tools.schemas())
+            streaming = getattr(self.provider, "stream_complete", None)
+            reply = streaming(messages, self.tools.schemas(), on_text) if on_text and streaming else self.provider.complete(messages, self.tools.schemas())
             if not reply.content and not reply.calls:
                 raise ProviderError("模型返回了空响应，请重试或检查模型配置。")
             assistant = reply.message()
