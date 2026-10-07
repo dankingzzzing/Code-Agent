@@ -1,2 +1,153 @@
-# -
-开发一个自主的代码智能体
+# Code Agent：代码审查助手
+
+Homework 1 · **2412190104 唐佳杰**
+
+一个可以运行和检查执行过程的代码审查 Agent。通过原生 LLM API 决定下一步操作，调用文件读取、Python AST 分析和可选的单元测试工具，再依据结果生成带位置与修复建议的报告。提供命令行、多轮聊天和本机 Web 界面。
+
+项目地址：[dankingzzzing/Code-Agent](https://github.com/dankingzzzing/Code-Agent)
+
+## 30 秒运行
+
+需要 **Python 3.10 或以上**。应用运行只使用 Python 标准库，不需要安装 LangChain、模型 SDK 或 Web 框架。从项目根目录运行：
+
+```powershell
+python -m code_agent review examples/buggy --demo --allow-exec --trace
+python -m code_agent serve --demo --allow-exec
+```
+
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。点击“含缺陷示例”开始审查，再选择“修复后示例”对比结果。
+
+![代码审查助手 Web 界面](docs/assets/web-home.png)
+
+**`--demo` 是可复现的离线规则规划器，不调用 LLM，不需要 API key。** 它与真实 LLM 共享 Agent 循环、工具、观察结果、记忆和界面，但仅支持预设的 Python 审查规则，不支持任意业务推理或通用自然语言问答。
+
+**`--allow-exec` 只应用于可信的本地测试。** 默认只读取和静态分析；开启后 unittest 会以当前用户权限运行 Python 代码。超时、环境变量过滤和输出限制不构成操作系统沙箱。
+
+## 功能
+
+| 能力 | 实现 |
+| --- | --- |
+| Agent 循环 | 用户任务 → 模型规划 → function calling → 工具观察 → 再次规划 → 报告 |
+| 真实 LLM | `responses` 原生接口和 `chat_completions` 兼容接口，可配置基础地址与模型 |
+| 工具 | `list_files`、`read_file`、`analyze_python`、可选 `run_tests` |
+| 审查证据 | 文件、行号、规则、严重程度、触发条件和修复建议 |
+| 交互 | 批量 CLI、带记忆的交互聊天、本机 Web |
+| 上下文记忆 | 保留完整工具调用轮次，可保存并继续 CLI 会话 |
+| 错误处理 | 工具错误作为观察返回；临时 API 错误重试；失败轮次不污染记忆 |
+| 可观察性 | `--trace` 行动轨迹，`--json` 结构化导出，Web 报告下载 |
+| 资源限制 | 工作区路径校验、文件大小、循环/工具预算、上下文长度、测试超时 |
+
+## 配置真实 LLM
+
+复制配置模板：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+在 `.env` 中填入自己的密钥、可用模型和服务基础地址。环境变量优先于 `.env`；密钥只用于服务端 API 请求，不会写入报告或浏览器。
+
+```dotenv
+LLM_API_KEY=填入你的密钥
+LLM_MODEL=填入支持工具调用的模型名
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_STYLE=responses
+```
+
+然后运行，**省略 `--demo`**：
+
+```powershell
+python -m code_agent doctor
+python -m code_agent review examples/buggy --allow-exec --trace
+python -m code_agent serve --allow-exec
+```
+
+`doctor` 检查配置是否齐全，不发送请求，也不验证密钥有效性。
+
+OpenAI 原生模型使用 `responses`。对于明确提供 Chat Completions 工具调用协议的服务，使用 `LLM_API_STYLE=chat_completions`，并将 `LLM_BASE_URL` 改为服务商文档中的基础地址。模型必须支持 function calling；两种 API 不能仅凭更换模型名互换。接口实现依据 [OpenAI 官方 Function Calling 文档](https://developers.openai.com/api/docs/guides/function-calling)。
+
+没有配置密钥时，真实模式明确报错，**不会自动伪装为 LLM 或悄悄回退到离线模式**。本次交付未提供真实模型密钥；API 协议、重试和 HTTP 发送通过本机模拟服务验证，真实云端调用需要用户配置后验证。
+
+## 命令行用法
+
+```powershell
+# 审查单个文件，默认不执行代码
+python -m code_agent review examples/buggy/calculator.py --demo
+
+# 自定义工作区和问题；目标路径相对于 --root
+python -m code_agent review src --root D:/your-project --task "检查异常处理与边界输入"
+
+# 将报告和完整行动轨迹导出为 JSON
+python -m code_agent review examples/buggy --demo --allow-exec --json --output artifacts/review.json
+
+# 多轮聊天；下次使用同一个会话名继续
+python -m code_agent chat --demo --target examples/buggy --session homework1
+
+# 真实 LLM 会话；不同模型或 API 使用不同会话名
+python -m code_agent chat --target examples/buggy --session llm-review
+
+# 调整本机 Web 端口
+python -m code_agent serve --demo --allow-exec --port 8765
+```
+
+聊天中输入 `/exit` 退出，`/reset` 清空记忆。CLI 会话保存在工作区 `.codeagent/sessions/`，包含用户输入、代码观察和回答，请不要上传；该目录已加入 `.gitignore`。Web 会话仅在当前服务内存中保存，服务重启后失效。
+
+可选安装为命令：`python -m pip install .`，随后使用 `code-review-agent review ...`。不安装也可以直接从源码运行。
+
+退出码：`0` 表示审查流程完成，`1` 表示配置、路径或服务错误，`2` 表示达到 Agent 预算，`130` 表示用户中止。**审查完成不等于被审查代码的测试通过**；测试通过/失败记录在报告和 `run_tests` 观察中。
+
+## 示例与验证
+
+`examples/buggy` 含故意保留的缺陷：空列表除零、可变默认参数、`eval` 解析用户输入、异常静默吞掉。`examples/fixed` 提供相同功能契约的修复。两份 `test_calculator.py` 使用相同的六个回归测试。
+
+```powershell
+# 项目自身的单元/集成测试
+python -m unittest discover -s tests -v
+
+# 修复版本，应全部通过
+python -m unittest discover -s examples/fixed -v
+
+# 含缺陷版本，预期失败，用来验证 Agent 能看到实际失败证据
+python -m unittest discover -s examples/buggy -v
+
+# 由 Agent 工具运行并观察两种版本
+python -m code_agent review examples/buggy --demo --allow-exec
+python -m code_agent review examples/fixed --demo --allow-exec
+```
+
+测试覆盖 Agent 工具闭环、追问上下文、预算停止、失败回滚、API 两种协议、瞬时错误重试、认证失败、工作区越界、敏感文件、文件上限、测试超时、CLI 和 Web 请求。GitHub Actions 在 Linux / Windows、Python 3.10 / 3.13 上运行检查。符号链接测试在无法创建链接的 Windows 环境中明确跳过。
+
+更多交付证据见 [验证记录](docs/VALIDATION.md)，演示步骤见 [一分钟演示](docs/DEMO.md)。
+
+实际操作视频：[41.92 秒演示录像](docs/assets/demo.mp4)（无配音）。
+
+## 目录与设计
+
+```text
+code_agent/
+  agent.py        Agent 循环、预算与行动事件
+  providers.py    Responses / Chat Completions / 离线规划器
+  tools.py        文件、AST 与可信测试工具
+  analysis.py     Python 静态规则
+  memory.py       完整轮次记忆和本地持久化
+  prompts.py      系统提示与 few-shot 示例
+  config.py       环境配置和校验
+  app.py          共享装配入口
+  cli.py          命令行与多轮聊天
+  web.py          本机 HTTP 服务
+  static/         无外部依赖的 Web 界面
+examples/         含缺陷 / 修复示例
+tests/            项目自动测试
+docs/             作业要求、演示和验证说明
+scripts/          提交包生成脚本
+```
+
+完整设计见 [DESIGN.md](DESIGN.md)。PPT 将设计文档拼写为 `Desgin.md`，本仓库也提供同名入口。[要求逐项对应](docs/REQUIREMENTS.md)说明各评分项的实现位置。
+
+## 提交
+
+```powershell
+python scripts/package_submission.py --student-id 2412190104 --name 唐佳杰
+```
+
+生成 `artifacts/2412190104-唐佳杰.zip`，包括代码、文档、测试、示例与演示材料；排除 `.git`、密钥、会话、缓存和临时依赖，并检查压缩包小于 200 MB。将其提交到课程的 `001Homework1`。GitHub 同步不代替课程平台提交。

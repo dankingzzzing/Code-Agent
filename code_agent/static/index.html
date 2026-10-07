@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Agent · 代码审查助手</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/">&lt;/&gt; CODE AGENT</a><span>Homework 01</span></header>
+  <main>
+    <section class="intro"><p class="eyebrow">代码审查助手</p><h1>让每一条建议<br>都有代码证据。</h1>
+      <p class="lead">读懂代码，定位风险，验证测试。<br>从工具调用到审查结果，过程清晰可见。</p>
+      <div class="mode"><span class="dot"></span><span id="mode">连接本机服务…</span></div>
+    </section>
+    <section class="workspace" aria-label="审查工作区">
+      <div class="section-head"><h2>开始一次审查</h2><button type="button" id="reset" class="quiet">新建会话</button></div>
+      <form id="review-form">
+        <label for="target">目标文件或目录</label>
+        <input id="target" name="target" value="examples/buggy" required maxlength="1000" spellcheck="false">
+        <div class="examples"><button type="button" data-target="examples/buggy">含缺陷示例</button><button type="button" data-target="examples/fixed">修复后示例</button></div>
+        <label for="task">你希望检查什么？</label>
+        <textarea id="task" name="task" rows="3" required maxlength="4000">审查代码，指出潜在问题，并验证测试。</textarea>
+        <div class="form-footer"><p id="exec-note">正在检查工具配置…</p><button id="run" type="submit">开始审查 <span>↗</span></button></div>
+      </form>
+      <p id="status" role="status" aria-live="polite">输入目标与问题，开始审查。</p>
+    </section>
+    <section id="results" class="results" hidden>
+      <div class="section-head"><h2>审查结果</h2><button type="button" id="download" class="quiet">下载报告 ↓</button></div>
+      <p id="metrics" class="metrics"></p>
+      <div class="result-grid"><article id="report" aria-label="审查报告"></article>
+        <aside><h3>行动轨迹</h3><p class="trace-note">公开操作与工具结果摘要</p><ol id="trace"></ol></aside></div>
+    </section>
+  </main>
+  <footer><span>2412190104 · 唐佳杰</span><span>Python · Native API · Tool Calling</span></footer>
+</body>
+</html>
