@@ -83,6 +83,8 @@ class ToolRegistry:
             return {"ok": False, "error": str(exc), "tool": name}
 
     def list_files(self, path: Path, max_files: int = 100) -> dict:
+        # Windows TEMP can use an 8.3 alias while root.resolve() uses the long path.
+        path = self.resolve(str(path.resolve(strict=True)))
         if path.is_file():
             return {"files": [path.relative_to(self.root).as_posix()], "truncated": False}
         paths, examined = [], 0
