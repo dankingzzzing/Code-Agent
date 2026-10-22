@@ -10,7 +10,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED = {".git", ".venv", ".qa", ".codeagent", "__pycache__", ".pytest_cache", "artifacts", "build", "dist", "node_modules"}
+EXCLUDED = {".vscode", ".git", ".venv", ".qa", ".codeagent", "__pycache__", ".pytest_cache", "artifacts", "build", "dist", "node_modules"}
 
 
 def included(path: Path) -> bool:

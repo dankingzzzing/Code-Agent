@@ -162,8 +162,8 @@ code_agent/
   static/         无外部依赖的 Web 界面
 examples/         含缺陷 / 修复示例
 tests/            项目自动测试
-docs/             作业要求、演示和验证说明
+docs/             使用演示和测试说明
 scripts/          提交包生成脚本
 ```
 
-完整设计见 [DESIGN.md](DESIGN.md)。PPT 将设计文档拼写为 `Desgin.md`，本仓库也提供同名入口。[要求逐项对应](docs/REQUIREMENTS.md)说明各评分项的实现位置。
+完整设计见 [DESIGN.md](DESIGN.md)，演示与测试方法见 `docs/`。
